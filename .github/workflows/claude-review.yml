@@ -1,0 +1,61 @@
+name: Reusable Claude Code Review
+
+# Reusable workflow that runs the Claude Code review action on a PR.
+# Consumers gate this with their own `on:` trigger (typically
+# `pull_request: [labeled]` with an `if:` on the label name).
+
+on:
+  workflow_call:
+    inputs:
+      model:
+        description: Claude model name to use for the review
+        type: string
+        default: claude-sonnet-4-6
+      extra_focus:
+        description: Optional repo-specific bullets appended to the review focus list
+        type: string
+        default: ""
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            Review this PR. Focus on:
+            - Real bugs and correctness issues
+            - Security problems
+            - Anything that breaks this repo's existing conventions
+            ${{ inputs.extra_focus }}
+
+            Rules:
+            - Skip nits, style preferences, and micro-optimizations.
+            - Be terse — one-line findings where possible, no preamble.
+            - If the PR is clean, say so in a single sentence.
+            - Always cite `file:line` for specific issues.
+            - Do not flag issues you have already raised on a previous commit
+              of this PR.
+
+            The PR branch is already checked out.
+            Use `gh pr comment` for top-level feedback.
+            Use `mcp__github_inline_comment__create_inline_comment` (with `confirmed: true`) for specific code issues.
+            Only post GitHub comments — don't submit review text as messages.
+          claude_args: |
+            --model ${{ inputs.model }}
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"

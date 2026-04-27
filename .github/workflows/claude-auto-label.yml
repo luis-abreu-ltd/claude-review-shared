@@ -1,0 +1,144 @@
+name: Reusable Claude Auto-Label
+
+# Reusable workflow: scores a PR's diff against signals correlated with
+# real-bug-finding and applies the `review-please` label when the score
+# meets the threshold. Consumers wire it up on `pull_request: [opened,
+# synchronize, reopened]` and pass repo-specific regexes.
+#
+# Default heuristic, in points (tunable via `threshold`):
+#
+#   +3  cache / TTL / invalidation surface (cacheKey, getCache, TTL, expires*)
+#   +3  touches both the API route prefix AND the lib prefix (path unification)
+#   +3  changes a balance/sum invariant (extra_invariant_regex)
+#   +2  removes `@deprecated` field or a `fallback` line
+#   +2  large diff (>large_added_lines OR >large_changed_files)
+#   +1  touches `engine_files_regex`
+#
+# Files matching `.github/workflows/` and `.gitignore` are excluded from the
+# scored diff so the auto-labeller doesn't self-match on its own scoring
+# regexes.
+
+on:
+  workflow_call:
+    inputs:
+      label_name:
+        description: Label to apply when the PR scores at or above the threshold
+        type: string
+        default: review-please
+      threshold:
+        description: Score threshold for applying the label
+        type: number
+        default: 3
+      api_prefix_regex:
+        description: Regex matching `^diff --git a/<api-routes-prefix>` lines
+        type: string
+        default: '^diff --git a/(src/)?app/api/'
+      lib_prefix_regex:
+        description: Regex matching `^diff --git a/<library-prefix>` lines
+        type: string
+        default: '^diff --git a/(src/)?lib/'
+      engine_files_regex:
+        description: Regex matching `^diff --git a/<engine-files-prefix>` lines (set per-repo for the +1 nudge)
+        type: string
+        default: ''
+      invariant_regex:
+        description: Regex of identifiers that signal a balance/sum/conservation change in the diff
+        type: string
+        default: '\b(toBeCloseTo|conservation|invariant|balance)\b'
+      large_added_lines:
+        description: Added-line threshold for the `large diff` signal
+        type: number
+        default: 200
+      large_changed_files:
+        description: Changed-file threshold for the `large diff` signal
+        type: number
+        default: 4
+
+jobs:
+  auto-label:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Score PR and apply label
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          LABEL: ${{ inputs.label_name }}
+          THRESHOLD: ${{ inputs.threshold }}
+          API_RE: ${{ inputs.api_prefix_regex }}
+          LIB_RE: ${{ inputs.lib_prefix_regex }}
+          ENGINE_RE: ${{ inputs.engine_files_regex }}
+          INVARIANT_RE: ${{ inputs.invariant_regex }}
+          LARGE_LINES: ${{ inputs.large_added_lines }}
+          LARGE_FILES: ${{ inputs.large_changed_files }}
+        run: |
+          set -euo pipefail
+
+          # Strip CI / .gitignore from the scored diff so the heuristic
+          # doesn't self-match against the workflow that defines it.
+          FULL_DIFF=$(gh pr diff "$PR" -R "$REPO")
+          DIFF=$(printf '%s\n' "$FULL_DIFF" | awk '
+            /^diff --git/ {
+              skip = ($0 ~ /\.github\/workflows\// || $0 ~ /\.gitignore$/) ? 1 : 0
+            }
+            !skip
+          ')
+          ADDED_LINES=$(printf '%s\n' "$DIFF" | grep -cE '^\+[^+]' || true)
+          CHANGED_FILES=$(printf '%s\n' "$DIFF" | grep -cE '^diff --git ' || true)
+
+          score=0
+          reasons=()
+
+          # +3: cache / TTL / invalidation
+          if printf '%s\n' "$DIFF" | grep -qiE '\b(cacheKey|getCache|TTL|invalid(ate|ation)|setEx|expir(es|esAt|ation))\b'; then
+            score=$((score + 3))
+            reasons+=("cache/TTL changes")
+          fi
+
+          # +3: touches both API and lib (likely path unification)
+          if [ -n "$API_RE" ] && [ -n "$LIB_RE" ] \
+             && printf '%s\n' "$DIFF" | grep -qE "$API_RE" \
+             && printf '%s\n' "$DIFF" | grep -qE "$LIB_RE"; then
+            score=$((score + 3))
+            reasons+=("touches both API route and lib (likely path unification)")
+          fi
+
+          # +3: balance/sum invariants
+          if printf '%s\n' "$DIFF" | grep -qiE "$INVARIANT_RE"; then
+            score=$((score + 3))
+            reasons+=("balance/sum invariants")
+          fi
+
+          # +2: drops a fallback / deprecated field
+          if printf '%s\n' "$DIFF" | grep -qE '^-.*@deprecated' \
+             || printf '%s\n' "$DIFF" | grep -qiE '^-.*fallback'; then
+            score=$((score + 2))
+            reasons+=("drops fallback / deprecated field")
+          fi
+
+          # +2: large diff
+          if [ "$ADDED_LINES" -gt "$LARGE_LINES" ] || [ "$CHANGED_FILES" -gt "$LARGE_FILES" ]; then
+            score=$((score + 2))
+            reasons+=("large diff (${ADDED_LINES} added lines, ${CHANGED_FILES} files)")
+          fi
+
+          # +1: engine/data files (per-repo regex)
+          if [ -n "$ENGINE_RE" ] && printf '%s\n' "$DIFF" | grep -qE "$ENGINE_RE"; then
+            score=$((score + 1))
+            reasons+=("touches engine/data files")
+          fi
+
+          echo "Score: $score (threshold: $THRESHOLD)"
+          for r in "${reasons[@]:-}"; do echo "  - $r"; done
+
+          if [ "$score" -ge "$THRESHOLD" ]; then
+            gh pr edit "$PR" -R "$REPO" --add-label "$LABEL"
+            joined=""
+            for r in "${reasons[@]:-}"; do joined="${joined}- ${r}\n"; done
+            gh pr comment "$PR" -R "$REPO" --body "$(printf 'Auto-labelled `%s` (score %d):\n\n%b\nRemove the label to skip review.' "$LABEL" "$score" "$joined")"
+          else
+            echo "Below threshold; not labelling."
+          fi
