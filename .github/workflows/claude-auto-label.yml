@@ -160,7 +160,7 @@ jobs:
             gh pr edit "$PR" -R "$REPO" --add-label "$LABEL"
             joined=""
             for r in "${reasons[@]:-}"; do joined="${joined}- ${r}\n"; done
-            gh pr comment "$PR" -R "$REPO" --body "$(printf 'Auto-labelled `%s` (score %d):\n\n%bAdd `[skip-review]` to the PR body to skip review.' "$LABEL" "$score" "$joined")"
+            gh pr comment "$PR" -R "$REPO" --body "$(printf 'Auto-labelled `%s` (score %d):\n\n%bRemove the `%s` label, or add `[skip-review]` to the PR body, to skip the review. The review job waits a few seconds before starting, so either signal takes effect on the run that was just dispatched.' "$LABEL" "$score" "$joined" "$LABEL")"
             echo "labelled=true" >> "$GITHUB_OUTPUT"
           else
             echo "Below threshold; not labelling."

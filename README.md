@@ -89,10 +89,20 @@ for the legacy path where a human applies the label manually.
 
 ## Opt-out
 
-Add `[skip-review]` (case-insensitive) anywhere in the PR body. The
-review job resolves to a single log line and exits without calling the
-Claude action. The marker takes effect on every dispatched run, so it
-also covers later pushes.
+Two ways, both checked at run time after a short delay (default 30s,
+configurable via `skip_delay_seconds`) so you have a window to react to
+the auto-labeller's PR comment:
+
+1. **Remove the `review-please` label.** One-shot opt-out for the run
+   that's currently waiting. Mirrors the v1 UX.
+2. **Add `[skip-review]` (case-insensitive) anywhere in the PR body.**
+   Sticky opt-out. Takes effect on every dispatched run, so it also
+   covers later pushes without re-removing the label each time.
+
+Either signal causes the job to log a single line and exit without
+calling the Claude action. The review job uses a `concurrency:` group
+keyed on the PR number, so if a label flap kicks off two runs, the
+older one is cancelled.
 
 ## Inputs
 
@@ -103,6 +113,8 @@ also covers later pushes.
 | `model` | `claude-sonnet-4-6` | Override for testing newer models |
 | `extra_focus` | `""` | Extra bullets appended to the review focus list |
 | `pr_number` | `""` | PR number. Required when called via `workflow_dispatch`. Optional under the legacy `pull_request: [labeled]` path; falls back to `github.event.pull_request.number`. |
+| `skip_label` | `review-please` | Label whose absence at run time signals "skip review". Match the `label_name` used by the auto-labeller. Set to `""` to disable the label gate. |
+| `skip_delay_seconds` | `30` | Seconds to sleep before re-checking the PR for skip signals. Set to `0` to disable. |
 
 Required secret: `ANTHROPIC_API_KEY`.
 
@@ -139,7 +151,9 @@ the workflow that defines the regexes doesn't self-match.
 
 - Force a review: dispatch from the Actions UI, or run
   `gh workflow run claude.yml -f pr=<num>` against the consumer repo.
-- Skip a review: add `[skip-review]` to the PR body before the next push.
+- Skip a review: remove the `review-please` label within the
+  `skip_delay_seconds` window after the bot's comment, or add
+  `[skip-review]` to the PR body (sticky across pushes).
 
 ## Migrating from v1 to v2
 
@@ -149,8 +163,9 @@ the workflow that defines the regexes doesn't self-match.
    to also match `workflow_dispatch`, and pass `pr_number` through.
 3. In `claude-auto-label.yml`, add `actions: write` to `permissions:`
    and set `dispatch_review: true` under `with:`.
-4. Replace any "remove the label to skip review" guidance you have
-   elsewhere (PR templates, contributor docs) with the
-   `[skip-review]` body marker.
+4. v2 keeps "remove the label" as an opt-out gesture (handled at run
+   time via the `skip_label` input + `skip_delay_seconds` window) and
+   adds `[skip-review]` in the PR body as a sticky alternative. PR
+   templates and contributor docs can mention either or both.
 
 The v1 workflows remain on the `v1` tag for repos that haven't migrated.
