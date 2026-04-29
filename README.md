@@ -13,23 +13,35 @@ diminishing-return findings. This repo splits the work in two:
    label when it crosses a threshold.
 2. A **review** job that runs only when that label is present.
 
-Both are reusable workflows — consumer repos call them with thin stubs.
+Both are reusable workflows. Consumer repos call them with thin stubs.
 
 ## Consumer setup
 
-Pick a release tag (`@v1`) and add two stubs to `.github/workflows/`:
+Pick a release tag (`@v2`) and add two stubs to `.github/workflows/`:
 
-### `.github/workflows/claude-review.yml`
+### `.github/workflows/claude.yml`
 
 ```yaml
 name: Claude Code Review
 on:
   pull_request:
     types: [labeled]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: PR number to review
+        required: true
+        type: number
 jobs:
   review:
-    if: github.event.label.name == 'review-please'
-    uses: luis-abreu-ltd/claude-review-shared/.github/workflows/claude-review.yml@v1
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'review-please'
+    uses: luis-abreu-ltd/claude-review-shared/.github/workflows/claude-review.yml@v2
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    with:
+      pr_number: ${{ github.event.inputs.pr || github.event.pull_request.number }}
     secrets:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 ```
@@ -43,9 +55,14 @@ on:
     types: [opened, synchronize, reopened]
 jobs:
   label:
-    uses: luis-abreu-ltd/claude-review-shared/.github/workflows/claude-auto-label.yml@v1
+    uses: luis-abreu-ltd/claude-review-shared/.github/workflows/claude-auto-label.yml@v2
+    permissions:
+      contents: read
+      pull-requests: write
+      actions: write
     with:
-      # Repo-specific tuning — see Inputs below
+      dispatch_review: true
+      # Repo-specific tuning, see Inputs below
       engine_files_regex: '^diff --git a/src/lib/(scenario-engine|self-consumption)'
       invariant_regex: '\b(totalConsumption|gridImport|selfConsumed|toBeCloseTo)\b'
 ```
@@ -56,6 +73,27 @@ Create the `review-please` label once per repo:
 gh label create review-please --color BFD4F2 --description "Trigger the Claude Code review workflow"
 ```
 
+## Why two triggers on the review workflow
+
+The auto-labeller applies the `review-please` label using the default
+`GITHUB_TOKEN`. GitHub deliberately does not let actions performed with
+that token trigger downstream workflows (anti-recursion guard), so a
+review workflow listening only on `pull_request: [labeled]` silently
+no-ops when the label is bot-applied.
+
+The fix: the auto-labeller (with `dispatch_review: true`) calls
+`gh workflow run claude.yml -f pr=<num>` after applying the label.
+`workflow_dispatch` is exempt from the anti-recursion guard, so the
+review actually fires. The `pull_request: [labeled]` trigger is kept
+for the legacy path where a human applies the label manually.
+
+## Opt-out
+
+Add `[skip-review]` (case-insensitive) anywhere in the PR body. The
+review job resolves to a single log line and exits without calling the
+Claude action. The marker takes effect on every dispatched run, so it
+also covers later pushes.
+
 ## Inputs
 
 ### `claude-review.yml`
@@ -64,6 +102,7 @@ gh label create review-please --color BFD4F2 --description "Trigger the Claude C
 |---|---|---|
 | `model` | `claude-sonnet-4-6` | Override for testing newer models |
 | `extra_focus` | `""` | Extra bullets appended to the review focus list |
+| `pr_number` | `""` | PR number. Required when called via `workflow_dispatch`. Optional under the legacy `pull_request: [labeled]` path; falls back to `github.event.pull_request.number`. |
 
 Required secret: `ANTHROPIC_API_KEY`.
 
@@ -79,6 +118,8 @@ Required secret: `ANTHROPIC_API_KEY`.
 | `invariant_regex` | `\b(toBeCloseTo\|conservation\|invariant\|balance)\b` | Per-repo: domain-specific identifiers |
 | `large_added_lines` | `200` | |
 | `large_changed_files` | `4` | |
+| `dispatch_review` | `false` | When true, dispatch the consumer's review workflow via `gh workflow run` after labelling. Requires `actions: write` in the consumer's permissions block. |
+| `dispatch_workflow_file` | `claude.yml` | Filename of the consumer workflow to dispatch when `dispatch_review` is true |
 
 ## Heuristic (in points)
 
@@ -96,8 +137,20 @@ the workflow that defines the regexes doesn't self-match.
 
 ## Manual override
 
-- Force a review: `gh pr edit <num> --add-label review-please`
-- Skip a review: remove the label before the workflow fires
-  (`gh pr edit <num> --remove-label review-please`). The review job is
-  triggered by the `labeled` event, so re-applying the label after a no-op
-  skip works.
+- Force a review: dispatch from the Actions UI, or run
+  `gh workflow run claude.yml -f pr=<num>` against the consumer repo.
+- Skip a review: add `[skip-review]` to the PR body before the next push.
+
+## Migrating from v1 to v2
+
+1. Bump `@v1` to `@v2` in both `.github/workflows/claude.yml` and
+   `.github/workflows/claude-auto-label.yml` of the consumer repo.
+2. In `claude.yml`, add the `workflow_dispatch` trigger, widen the `if:`
+   to also match `workflow_dispatch`, and pass `pr_number` through.
+3. In `claude-auto-label.yml`, add `actions: write` to `permissions:`
+   and set `dispatch_review: true` under `with:`.
+4. Replace any "remove the label to skip review" guidance you have
+   elsewhere (PR templates, contributor docs) with the
+   `[skip-review]` body marker.
+
+The v1 workflows remain on the `v1` tag for repos that haven't migrated.

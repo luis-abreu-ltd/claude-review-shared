@@ -1,8 +1,19 @@
 name: Reusable Claude Code Review
 
 # Reusable workflow that runs the Claude Code review action on a PR.
-# Consumers gate this with their own `on:` trigger (typically
-# `pull_request: [labeled]` with an `if:` on the label name).
+# Consumers gate this with their own `on:` trigger — typically
+# `pull_request: [labeled]` (label-driven path) or `workflow_dispatch`
+# (dispatched-from-auto-labeller path; see `claude-auto-label.yml`).
+#
+# When called from `workflow_dispatch`, the consumer must pass `pr_number`
+# (there is no implicit `github.event.pull_request` context to fall back on).
+# The legacy `pull_request: [labeled]` path can omit `pr_number` and the
+# workflow will resolve it from `github.event.pull_request.number`.
+#
+# Opt-out: if the PR body contains `[skip-review]` (case-insensitive) the
+# job exits early with a single log line. This replaces the old
+# label-removal opt-out, which no longer works once the review is
+# dispatched programmatically.
 
 on:
   workflow_call:
@@ -13,6 +24,12 @@ on:
         default: claude-sonnet-4-6
       extra_focus:
         description: Optional repo-specific bullets appended to the review focus list
+        type: string
+        default: ""
+      pr_number:
+        description: PR number to review. Required when called via workflow_dispatch
+          (no implicit pull_request context). Leave empty for the legacy label-trigger
+          path; the workflow falls back to github.event.pull_request.number.
         type: string
         default: ""
     secrets:
@@ -27,16 +44,55 @@ jobs:
       pull-requests: write
       id-token: write
     steps:
+      - name: Resolve PR context
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_INPUT: ${{ inputs.pr_number }}
+          FALLBACK_PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ -n "$PR_INPUT" ]; then
+            PR_NUMBER="$PR_INPUT"
+          else
+            PR_NUMBER="$FALLBACK_PR"
+          fi
+          if [ -z "$PR_NUMBER" ]; then
+            echo "::error::No PR number resolved (neither pr_number input nor pull_request context available)."
+            exit 1
+          fi
+          PR_DATA=$(gh pr view "$PR_NUMBER" -R "$REPO" --json headRefName,headRefOid,body)
+          HEAD_REF=$(printf '%s' "$PR_DATA" | jq -r '.headRefName')
+          HEAD_SHA=$(printf '%s' "$PR_DATA" | jq -r '.headRefOid')
+          BODY=$(printf '%s' "$PR_DATA" | jq -r '.body // ""')
+          echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "head_ref=$HEAD_REF" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+          if printf '%s' "$BODY" | grep -qi '\[skip-review\]'; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Skip review (PR body contains [skip-review])
+        if: steps.pr.outputs.skip == 'true'
+        run: |
+          echo "PR #${{ steps.pr.outputs.pr_number }} opted out of review via [skip-review] marker in body."
+
       - uses: actions/checkout@v6
+        if: steps.pr.outputs.skip != 'true'
         with:
+          ref: ${{ steps.pr.outputs.head_sha }}
           fetch-depth: 1
 
       - uses: anthropics/claude-code-action@v1
+        if: steps.pr.outputs.skip != 'true'
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           prompt: |
             REPO: ${{ github.repository }}
-            PR NUMBER: ${{ github.event.pull_request.number }}
+            PR NUMBER: ${{ steps.pr.outputs.pr_number }}
 
             Review this PR. Focus on:
             - Real bugs and correctness issues
