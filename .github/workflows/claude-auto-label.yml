@@ -5,6 +5,13 @@ name: Reusable Claude Auto-Label
 # meets the threshold. Consumers wire it up on `pull_request: [opened,
 # synchronize, reopened]` and pass repo-specific regexes.
 #
+# When `dispatch_review: true`, the workflow also dispatches the
+# consumer's `claude.yml` workflow (via `gh workflow run`) after applying
+# the label. This bypasses GitHub's "default GITHUB_TOKEN can't trigger
+# downstream workflows" guard, which otherwise causes the
+# `pull_request: [labeled]` trigger on `claude.yml` to silently no-op
+# when the label is bot-applied.
+#
 # Default heuristic, in points (tunable via `threshold`):
 #
 #   +3  cache / TTL / invalidation surface (cacheKey, getCache, TTL, expires*)
@@ -53,6 +60,19 @@ on:
         description: Changed-file threshold for the `large diff` signal
         type: number
         default: 4
+      dispatch_review:
+        description: After applying the label, dispatch the consumer's `claude.yml`
+          workflow via `gh workflow run` (works around the GITHUB_TOKEN
+          downstream-trigger guard). The consumer's `claude.yml` must declare
+          a `workflow_dispatch` trigger with a `pr` input. The consumer's
+          permissions block must also grant `actions: write`.
+        type: boolean
+        default: false
+      dispatch_workflow_file:
+        description: Filename of the consumer's review workflow to dispatch when
+          `dispatch_review` is true. Defaults to `claude.yml`.
+        type: string
+        default: claude.yml
 
 jobs:
   auto-label:
@@ -60,8 +80,10 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
+      actions: write
     steps:
       - name: Score PR and apply label
+        id: score
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR: ${{ github.event.pull_request.number }}
@@ -138,7 +160,21 @@ jobs:
             gh pr edit "$PR" -R "$REPO" --add-label "$LABEL"
             joined=""
             for r in "${reasons[@]:-}"; do joined="${joined}- ${r}\n"; done
-            gh pr comment "$PR" -R "$REPO" --body "$(printf 'Auto-labelled `%s` (score %d):\n\n%b\nRemove the label to skip review.' "$LABEL" "$score" "$joined")"
+            gh pr comment "$PR" -R "$REPO" --body "$(printf 'Auto-labelled `%s` (score %d):\n\n%bRemove the `%s` label, or add `[skip-review]` to the PR body, to skip the review. The review job waits a few seconds before starting, so either signal takes effect on the run that was just dispatched.' "$LABEL" "$score" "$joined" "$LABEL")"
+            echo "labelled=true" >> "$GITHUB_OUTPUT"
           else
             echo "Below threshold; not labelling."
+            echo "labelled=false" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Dispatch review workflow
+        if: inputs.dispatch_review && steps.score.outputs.labelled == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          WORKFLOW_FILE: ${{ inputs.dispatch_workflow_file }}
+        run: |
+          set -euo pipefail
+          gh workflow run "$WORKFLOW_FILE" -R "$REPO" -f pr="$PR"
+          echo "Dispatched $WORKFLOW_FILE for PR #$PR"

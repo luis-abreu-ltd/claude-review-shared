@@ -1,8 +1,22 @@
 name: Reusable Claude Code Review
 
 # Reusable workflow that runs the Claude Code review action on a PR.
-# Consumers gate this with their own `on:` trigger (typically
-# `pull_request: [labeled]` with an `if:` on the label name).
+# Consumers gate this with their own `on:` trigger — typically
+# `pull_request: [labeled]` (label-driven path) or `workflow_dispatch`
+# (dispatched-from-auto-labeller path; see `claude-auto-label.yml`).
+#
+# When called from `workflow_dispatch`, the consumer must pass `pr_number`
+# (there is no implicit `github.event.pull_request` context to fall back on).
+# The legacy `pull_request: [labeled]` path can omit `pr_number` and the
+# workflow will resolve it from `github.event.pull_request.number`.
+#
+# Opt-out (two ways, checked at run time after a configurable delay so
+# the user has a window to react to the auto-labeller's PR comment):
+#   1. Remove the gate label (`skip_label`, default `review-please`).
+#   2. Add `[skip-review]` (case-insensitive) anywhere in the PR body.
+# Either signal causes the job to exit early with a single log line.
+# The body marker takes effect on every dispatched run, so it also
+# covers later pushes; the label is a one-shot gesture for the current run.
 
 on:
   workflow_call:
@@ -15,6 +29,23 @@ on:
         description: Optional repo-specific bullets appended to the review focus list
         type: string
         default: ""
+      pr_number:
+        description: PR number to review. Required when called via workflow_dispatch
+          (no implicit pull_request context). Leave empty for the legacy label-trigger
+          path; the workflow falls back to github.event.pull_request.number.
+        type: string
+        default: ""
+      skip_label:
+        description: Label whose absence at run time signals "skip review". Match the
+          `label_name` used by the auto-labeller. Set to "" to disable the label gate.
+        type: string
+        default: review-please
+      skip_delay_seconds:
+        description: Seconds to sleep before re-checking the PR for skip signals.
+          Gives the user a window to remove the label or add `[skip-review]` after
+          seeing the auto-labeller's comment. Set to 0 to disable the delay.
+        type: number
+        default: 30
     secrets:
       ANTHROPIC_API_KEY:
         required: true
@@ -26,17 +57,82 @@ jobs:
       contents: read
       pull-requests: write
       id-token: write
+    concurrency:
+      group: claude-review-${{ github.repository }}-pr-${{ inputs.pr_number != '' && inputs.pr_number || github.event.pull_request.number }}
+      cancel-in-progress: true
     steps:
+      - name: Resolve PR number and head SHA
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_INPUT: ${{ inputs.pr_number }}
+          FALLBACK_PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ -n "$PR_INPUT" ]; then
+            PR_NUMBER="$PR_INPUT"
+          else
+            PR_NUMBER="$FALLBACK_PR"
+          fi
+          if [ -z "$PR_NUMBER" ]; then
+            echo "::error::No PR number resolved (neither pr_number input nor pull_request context available)."
+            exit 1
+          fi
+          HEAD_SHA=$(gh pr view "$PR_NUMBER" -R "$REPO" --json headRefOid -q '.headRefOid')
+          echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Wait, then check skip signals
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          SKIP_LABEL: ${{ inputs.skip_label }}
+          DELAY: ${{ inputs.skip_delay_seconds }}
+        run: |
+          set -euo pipefail
+          if [ "$DELAY" -gt 0 ]; then
+            echo "Waiting ${DELAY}s before checking skip signals (lets the user remove the label or add [skip-review])..."
+            sleep "$DELAY"
+          fi
+          PR_DATA=$(gh pr view "$PR_NUMBER" -R "$REPO" --json labels,body)
+          BODY=$(printf '%s' "$PR_DATA" | jq -r '.body // ""')
+          LABELS=$(printf '%s' "$PR_DATA" | jq -r '[.labels[].name] | join(",")')
+
+          skip_reason=""
+          if printf '%s' "$BODY" | grep -qi '\[skip-review\]'; then
+            skip_reason="PR body contains [skip-review]"
+          elif [ -n "$SKIP_LABEL" ] && ! printf '%s' "$LABELS" | tr ',' '\n' | grep -Fxq "$SKIP_LABEL"; then
+            skip_reason="gate label \`$SKIP_LABEL\` is no longer present"
+          fi
+
+          if [ -n "$skip_reason" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "reason=$skip_reason" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Skip review
+        if: steps.gate.outputs.skip == 'true'
+        run: |
+          echo "PR #${{ steps.pr.outputs.pr_number }} opted out of review: ${{ steps.gate.outputs.reason }}."
+
       - uses: actions/checkout@v6
+        if: steps.gate.outputs.skip != 'true'
         with:
+          ref: ${{ steps.pr.outputs.head_sha }}
           fetch-depth: 1
 
       - uses: anthropics/claude-code-action@v1
+        if: steps.gate.outputs.skip != 'true'
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           prompt: |
             REPO: ${{ github.repository }}
-            PR NUMBER: ${{ github.event.pull_request.number }}
+            PR NUMBER: ${{ steps.pr.outputs.pr_number }}
 
             Review this PR. Focus on:
             - Real bugs and correctness issues
