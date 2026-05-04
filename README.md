@@ -1,7 +1,16 @@
 # claude-review-shared
 
-Reusable GitHub Actions workflows for label-gated Claude Code reviews.
-Consumed by `luis-abreu-ltd/*` repos.
+Reusable GitHub Actions workflows for label-gated Claude Code reviews,
+plus shared standards documents linked from consumer repos.
+
+Consumed by `luis-abreu-ltd/*` repos and the Doist-org repos Luis
+maintains.
+
+## Shared standards
+
+- [Release standard](docs/RELEASE-STANDARD.md) — SemVer, `CHANGELOG.md`
+  format, `scripts/release.sh` contract, Twist-announce note for
+  Doist-org repos.
 
 ## Why
 
