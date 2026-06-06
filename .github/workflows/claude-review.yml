@@ -130,6 +130,11 @@ jobs:
         if: steps.gate.outputs.skip != 'true'
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # The auto-labeller dispatches this workflow as github-actions[bot]
+          # (default GITHUB_TOKEN). claude-code-action blocks bot-initiated runs
+          # by default, so allow that bot through — otherwise every dispatched
+          # review aborts with "Workflow initiated by non-human actor".
+          allowed_bots: github-actions
           prompt: |
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ steps.pr.outputs.pr_number }}
