@@ -105,7 +105,7 @@ jobs:
           if printf '%s' "$BODY" | grep -qi '\[skip-review\]'; then
             skip_reason="PR body contains [skip-review]"
           elif [ -n "$SKIP_LABEL" ] && ! printf '%s' "$LABELS" | tr ',' '\n' | grep -Fxq "$SKIP_LABEL"; then
-            skip_reason="gate label \`$SKIP_LABEL\` is no longer present"
+            skip_reason="gate label '$SKIP_LABEL' is not present"
           fi
 
           if [ -n "$skip_reason" ]; then
@@ -117,8 +117,17 @@ jobs:
 
       - name: Skip review
         if: steps.gate.outputs.skip == 'true'
+        # Values go through env, never straight into the script body. The reason
+        # string contains backticks, and interpolating it inline made the runner
+        # execute the label name as a command: the log read
+        # `review-please: command not found` and the message printed with an
+        # empty label, which is exactly when someone is reading it to find out
+        # which label was missing. Untrusted PR-derived text lands here too.
         run: |
-          echo "PR #${{ steps.pr.outputs.pr_number }} opted out of review: ${{ steps.gate.outputs.reason }}."
+          echo "PR #${PR_NUMBER} opted out of review: ${SKIP_REASON}."
+        env:
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          SKIP_REASON: ${{ steps.gate.outputs.reason }}
 
       - uses: actions/checkout@v6
         if: steps.gate.outputs.skip != 'true'
