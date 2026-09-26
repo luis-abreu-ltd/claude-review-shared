@@ -158,8 +158,11 @@ the workflow that defines the regexes doesn't self-match.
 
 ## Manual override
 
-- Force a review: dispatch from the Actions UI, or run
-  `gh workflow run claude.yml -f pr=<num>` against the consumer repo.
+- Force a review: add the `review-please` label to the PR. A dispatch
+  (Actions UI, or `gh workflow run claude.yml -f pr=<num>`) only reviews a
+  PR that already carries the label; on an unlabelled PR it skips at the
+  gate. Pass `skip_label: ""` in the consumer stub to let dispatches
+  bypass the gate.
 - Skip a review: remove the `review-please` label within the
   `skip_delay_seconds` window after the bot's comment, or add
   `[skip-review]` to the PR body (sticky across pushes).
